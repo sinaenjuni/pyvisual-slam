@@ -1,0 +1,20 @@
+Cython==3.0.11
+distro==1.9.0
+g2o-python @ file:///Users/shinhyeonjun/thirdparty/python/g2o-python
+imageio==2.36.0
+lazy_loader==0.4
+networkx==3.4.2
+numpy==2.1.1
+opencv-python==4.10.0.84
+packaging==24.1
+pillow==10.4.0
+pybind11==2.13.6
+PyOpenGL==3.1.6
+PyOpenGL-accelerate==3.1.6
+pypangolin @ file:///Users/shinhyeonjun/thirdparty/Pangolin/build/pypangolin-0.9.2-cp312-cp312-macosx_14_0_arm64.whl#sha256=f7fed6cc5aea03480797e6fb5148e4ceb2740b6f12bb420abc4baff97a544fd9
+PyYAML==6.0.2
+scikit-build==0.18.1
+scipy==1.14.1
+setuptools==75.1.0
+tifffile==2024.9.20
+wheel==0.44.0

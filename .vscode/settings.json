@@ -1,0 +1,33 @@
+{   
+    // "python.pipenvPath": "/Users/shinhyeonjun/.pyenv/versions/3.12.6/envs/slam2/bin/python",
+    // "python.pythonPath": "",
+    // "python.analysis.extraPaths": ["/Users/shinhyeonjun/.pyenv/versions/3.12.6/envs/slam2/lib/python3.12/site-packages/"],
+    "python.pythonPath": "/Users/shinhyeonjun/.pyenv/versions/slam2/bin/python",
+
+    "python.analysis.extraPaths": [
+        "src"
+    ],
+    "python.autoComplete.extraPaths": [
+        "src"
+    ],
+
+    "python.analysis.typeCheckingMode": "off", // vscode 타입 채크 관련 규칙 지정
+    "python.linting.flake8Args": [ // vscode flake8 lint 설정
+        "--max-line-length=119",
+        "--exclude=.git,migrations/*,envs/"
+    ],
+    "python.languageServer": "Pylance", // Pylance 활성화
+    "python.analysis.autoImportCompletions": false,
+    "python.testing.pytestArgs": [
+        "src"
+    ],
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestEnabled": true,
+
+    // "debug.inlineValues": "on", 
+    "debugpy.showPythonInlineValues": true,
+    "cSpell.words": [
+        "reprojection"
+    ]
+
+}
