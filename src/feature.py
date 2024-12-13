@@ -1,54 +1,85 @@
 import cv2
 import numpy as np
 import heapq
+from map import Frame
+from camera import Camera
+from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
+
+class Feature_extractor(ABC):
+    @abstractmethod
+    def detect(self):
+        pass
+    @abstractmethod
+    def compute(self):
+        pass
+    @abstractmethod
+    def detect_and_compute(self):
+        pass
+
+
+class FAST_GFTTD(Feature_extractor):
+    def __init__(self):
+        n_features = 4000
+        self.n_levels = 8
+        self.scale_factor = 1.2
+        self.scale2_factors = np.array([self.scale_factor ** i for i in range(self.n_levels)])
+        self.scale2inv_factors = np.array([1.0/scale_factor for scale_factor in self.scale2_factors])
+
+        self.detector = cv2.GFTTDetector.create(n_features, 0.01, 5)
+        self.descriptor = cv2.ORB.create()
+        matcher = cv2.BFMatcher(normType=cv2.NORM_HAMMING, crossCheck=False)
+
+    def detect(self, img):
+        points = self.detector.detect(img, None)
+        return points
+    
+    def compute(self, img, points):
+        points, des = self.descriptor.compute(img, points)
+        return points, des
+    
+    def detect_and_compute(self, frame:Frame):
+        points = self.detect(frame.img)
+        points, des = self.compute(frame.img, points)
+
+        frame.kps = np.array([p.pt for p in points])
+        frame.kpsn = frame.camera.unproject(frame.kps)
+        frame.des = des
+        frame.octave = np.array([p.octave for p in points])
+        frame.scale2 = self.scale2_factors[frame.octave]
+        frame.scale2inv = self.scale2inv_factors[frame.octave]
+        
 
 class Octree_node:
-    def __init__(self, xmin, ymin, xmax, ymax):
+    def __init__(self, points, xmin, ymin, xmax, ymax):
         self.xmin = xmin
         self.ymin = ymin
         self.xmax = xmax
         self.ymax = ymax
-        self.is_done = False
-        self.points = []
 
-    def add_point(self, point):
-        x, y = point.pt
-        if not (self.xmin <= int(x) <= self.xmax):
-            raise ValueError(f"The range of x [{self.xmin} - {self.xmax}] but the point range of this node is [{x, y}]")
-        if not (self.ymin <= int(y) <= self.ymax):
-            raise ValueError(f"The range of y [{self.ymin} - {self.ymax}] but the point range of this node is [{x, y}]")
-        self.points.append(point)
+        mask = np.bitwise_and(
+            np.bitwise_and(self.xmin <= points[:, 0], self.xmax > points[:, 0]),
+            np.bitwise_and(self.ymin <= points[:, 1], self.ymax > points[:, 1])
+        )
+        self.points = points[mask]
 
+        is_depth = (self.xmax - self.xmin) < 3 or (self.ymax - self.ymin) < 3
+        is_point = len(self.points) == 1
+        self.is_done = is_depth or is_point
+        
     def divide_node(self):
         xhalf = self.xmin + ((self.xmax - self.xmin) // 2)
         yhalf = self.ymin + ((self.ymax - self.ymin) // 2)
 
-        UL = Octree_node(self.xmin, self.ymin, xhalf, yhalf)
-        UR = Octree_node(xhalf, self.ymin, self.xmax, yhalf)
-        BL = Octree_node(self.xmin, yhalf, xhalf, self.ymax)
-        BR = Octree_node(xhalf, yhalf, self.xmax, self.ymax)
+        UL = Octree_node(self.points, self.xmin, self.ymin, xhalf, yhalf)
+        UR = Octree_node(self.points, xhalf, self.ymin, self.xmax, yhalf)
+        BL = Octree_node(self.points, self.xmin, yhalf, xhalf, self.ymax)
+        BR = Octree_node(self.points, xhalf, yhalf, self.xmax, self.ymax)
 
-        for point in self.points:
-            x, y = point.pt
-            if x < xhalf:
-                if y < yhalf:
-                    UL.add_point(point)
-                else:
-                    BL.add_point(point)
-            else:
-                if y < yhalf:
-                    UR.add_point(point)
-                else:
-                    BR.add_point(point)
-        
-        if len(UL) == 0:
-            UL = None
-        if len(UR) == 0:
-            UR = None
-        if len(BL) == 0:
-            BL = None
-        if len(BR) == 0:
-            BR = None
+        UL = None if len(UL) == 0 else UL
+        UR = None if len(UR) == 0 else UR
+        BL = None if len(BL) == 0 else BL
+        BR = None if len(BR) == 0 else BR
         return UL, UR, BL, BR
 
     def __len__(self):
@@ -65,119 +96,181 @@ class Octree_node:
     def draw_data(self, img, only_box=False, color=(255,0,0), thickness=1):
         img = cv2.rectangle(img, (self.xmin, self.ymin), (self.xmax, self.ymax), color, thickness)
         if only_box:
-            for point in self.points:
-                center = list(map(int, point.pt))
+            for x, y, response, octave in self.points:
+                center = list(map(int, [x, y]))
                 cv2.circle(img, center, 2, color, -1 * thickness, cv2.LINE_AA)
         return img
 
-
-class Feature_detector:
-    def __init__(self, HEIGHT, WIDTH, n_points=2000, scale_factor=1.2, n_levels=8):
+class FAST_ORB(Feature_extractor):
+    def __init__(self, camera:Camera, n_points=2000, scale_factor=1.2, n_levels=8, feature_size=10, margin=5):
         self.detector = cv2.FastFeatureDetector.create(threshold=20, nonmaxSuppression=True)
+        self.descriptor = cv2.ORB.create()
+        self.camera = camera
+        self.w = camera.width
+        self.h = camera.height
 
         self.n_points = n_points
         self.n_levels = n_levels
+        self.feature_size = feature_size
+        self.margin = margin
         self.scale_factor = scale_factor
-        self.scale_factors = [self.scale_factor ** i for i in range(self.n_levels)]
-        self.w = WIDTH
-        self.h = HEIGHT
-        self.imgs = [np.empty((self.h, self.w), dtype=np.int8)] * n_levels
-        self.points = []
+        self.scale2_factors = np.array([self.scale_factor ** i for i in range(self.n_levels)])
+        self.scale2inv_factors = np.array([1.0/scale_factor for scale_factor in self.scale2_factors])
+        # The reason for using the inverse of sigma is the inaccuracy of the feature pyramid method. 
+        # because the higher layer has a lower resolution, it has a lower accuracy.
+        # Therefore the inverse of sigma in a high layer is low value.
+        self.imgs = [None] * self.n_levels
+        self.points = [] 
+
 
     def detect(self, img):
-        self.get_image_pyramid(img)
-        for level in range(self.n_levels):
-            self.detect_feature_with_level(level)
-        points = self.octree_filtering(0, 0, self.w, self.h)
-        return points
-    
-    def get_image_pyramid(self, img):
-        inv_scale = 1.0/self.scale_factor
-        resized_img = img
-        for i in range(self.n_levels):
-            self.imgs[i] = resized_img
-            resized_img = cv2.resize(resized_img, (0,0), fx=inv_scale, fy=inv_scale)
+        self.make_image_pyramid(img)
+        self.detect_feature_all_octave()
+        
+        if len(self.points) > self.n_points:
+            points = self.octree_filtering(0, 0, self.w, self.h)
+            return points
+        else:
+            return self.points
 
-    def detect_feature_with_level(self, level):
-        points = self.detector.detect(self.imgs[level])
+    def compute(self, img, points):
+        cv_points = [cv2.KeyPoint(x, y, self.feature_size, -1, response, int(octave), -1) for x, y, response, octave in points]
+        points, des = self.descriptor.compute(img, cv_points)
+        return points, des
+    
+    def detect_and_compute(self, frame:Frame):
+        points = self.detect(frame.img)
+        points, des = self.compute(frame.img, points)
+        
+        frame.kps = np.array([p.pt for p in points])
+        frame.kpsn = frame.camera.unproject(frame.kps)
+        frame.des = des
+        frame.octave = np.array([p.octave for p in points])
+        frame.scale2 = self.scale2_factors[frame.octave]
+        frame.scale2inv = self.scale2inv_factors[frame.octave]
+
+        return points, des
+    
+    def make_image_pyramid(self, img):
+        inv_scale = self.scale2inv_factors[1]
+        self.imgs[0] = img
+        for i in range(1, self.n_levels):
+            self.imgs[i] = cv2.resize(self.imgs[i-1], (0,0), fx=inv_scale, fy=inv_scale)
+
+    def detect_feature_with_octave(self, octave):
+        points = self.detector.detect(self.imgs[octave])
         for point in points:
-            # kp.size = 
-            point.octave = level
             x, y = point.pt
-            x = x * self.scale_factors[level]
-            y = y * self.scale_factors[level]
-            point.pt = (x, y)
-            self.points.append(point)
+            x = x * self.scale2_factors[octave]
+            y = y * self.scale2_factors[octave]
+            self.points.append([x, y, point.response, octave])
+
+    def detect_feature_all_octave(self):
+        self.points = [] 
+        # for i in range(self.n_levels):
+            # self.detect_feature_with_octave(i)
+            
+        futures = []
+        with ThreadPoolExecutor(max_workers = 4) as executor:
+            for i in range(self.n_levels):
+                futures.append(
+                    executor.submit(
+                        self.detect_feature_with_octave, i))
+            wait(futures) # wait all the task are completed 
+        self.points = np.array(self.points)
 
     def octree_filtering(self, xmin, ymin, xmax, ymax):
         n_init_node = round((xmax - xmin) / (ymax - ymin))
 
         hX = (xmax-xmin)/n_init_node
         l_nodes = []
-
         for i in range(n_init_node):
-            node = Octree_node(round(hX*i), 0, round(hX*(i+1)), ymax - ymin)
-            l_nodes.append(node)
+            node = Octree_node(self.points, round(hX*i), 0, round(hX*(i+1)), ymax - ymin)
+            heapq.heappush(l_nodes, node)
 
-        for kp in self.points:
-            idx = int(kp.pt[0]/hX)
-            l_nodes[idx].add_point(kp)
-
-        done_count = 0
+        done_nodes = []
         heapq.heapify(l_nodes)
         while 1:
             node = heapq.heappop(l_nodes)
-            if self.n_points <= done_count or self.n_points <= len(l_nodes):
+            if node.is_done:
+                done_nodes.append(node)
+                continue
+            if len(node) > 2:
+                for new_node in node.divide_node():
+                    if new_node is not None:
+                        heapq.heappush(l_nodes, new_node)
+            if self.n_points <= len(done_nodes) + len(l_nodes):
                 heapq.heappush(l_nodes, node)
                 break
-            if len(node) == 0:
-                continue
-            if len(node) == 1:
-                node.is_done = True
-                done_count = done_count + 1
-                heapq.heappush(l_nodes, node)
-                continue
-            
-            nodes = node.divide_node()
-            for node in nodes:
-                if node:
-                    heapq.heappush(l_nodes, node)
         
-        self.points.clear()
+        l_nodes.extend(done_nodes)
+
+        ret = []
         for node in l_nodes:
             best_response = 0
             best_point = None
             for point in node.points:
-                if best_response <= point.response:
-                    best_response = point.response
+                if best_response <= point[2]:
+                    best_response = point[2]
                     best_point = point
-            # node.points.clear()
-            # node.points.append(best_point)
-            self.points.append(best_point)
-        
+            ret.append(best_point)
         # for node in l_nodes:
-        #     color = np.random.randint(0,255, 3, dtype=np.uint8).tolist()
-        #     node.draw_data(img, True, color, 1)
-        #     ret = ret + len(node.points)
+            # color = np.random.randint(0,255, 3, dtype=np.uint8).tolist()
+            # node.draw_data(img, True, color, 1)
+            # ret = ret + len(node.points)
 
-        self.points.sort(key=lambda x : x.response, reverse=True)
-        return self.points[:self.n_points]
+        ret.sort(key=lambda x : x[2], reverse=True)
+        return np.array(ret[:self.n_points])
 
 
 if __name__ == "__main__":
-    import yaml
-    with open("./settings.yaml", "r") as f:
-        settings = yaml.safe_load(f)
-    PATH = settings["KITTI"]["PATH"]["img_dirs"][0]
+    import sys
+    np.set_printoptions(threshold=sys.maxsize)
 
-    cap = cv2.VideoCapture(PATH)
-    ret, img = cap.read()
-    gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    h, w = gray_img.shape
-    
-    fd = Feature_detector(h, w)
-    kps = fd.detect(gray_img)
+    import time
+    from pyinstrument import Profiler
+    profiler = Profiler()
 
-    img = cv2.drawKeypoints(img, kps, None)
-    cv2.imshow("img", img)
-    cv2.waitKey()
+    from settings import KITTI_Monocular_dataset
+    settings = KITTI_Monocular_dataset()
+    camera = Camera(settings.K, settings.width, settings.height, settings.Rt)
+
+    cap = cv2.VideoCapture(settings.img_path)
+    # cap.set(cv2.CAP_PROP_POS_FRAMES, 1131)
+
+    fd = FAST_ORB(camera, 2000)
+    while 1:
+        ret, img = cap.read()
+        print(cap.get(cv2.CAP_PROP_POS_FRAMES))
+        gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        frame = Frame(gray_img, camera)
+        if not ret:
+            break
+        # start = time.perf_counter()
+        # profiler.start()
+
+        # fd.make_image_pyramid(frame.img)
+        # fd.detect_feature_with_octave(0)
+        # fd.detect_feature_all_octave()
+        # print(fd.points)
+
+        # points = fd.detect(gray_img)
+        fd.detect_and_compute(frame)
+        # print(points[0].angle)
+        print(np.unique([octave for octave in frame.octave], return_counts=True))
+
+        # end = time.perf_counter()
+        # print(f"Execution time: {end - start} seconds")
+        # profiler.stop()
+        # print(profiler.output_text(unicode=True, color=True))
+        # profiler.reset()
+
+        # kps = fd.detect(gray_img)
+        
+        # img = cv2.drawKeypoints(img, points, None)
+        # for x, y, response, octave in points:
+            # cv2.circle(img, (int(x), int(y)), 2, (255,0,0), -1, cv2.LINE_AA)
+        cv2.imshow("img", img)
+        key = cv2.waitKey()
+        if key == 32: key = cv2.waitKey()
+        if key == ord('q'): break

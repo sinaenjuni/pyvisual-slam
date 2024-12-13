@@ -9,6 +9,7 @@ import pickle
 
 import numpy as np
 import numpy.linalg as la
+from map import Map
 
 class Map_model:
     def __init__(self):
@@ -122,21 +123,20 @@ class Viewer3D:
         pango.FinishFrame()
 
 
-    def draw_map(self, key_frames, map_points):
-        
+    def draw_map(self, map:Map):
         if self._is_stop.value:
             return False
 
         map_model = Map_model()
 
-        for key_frame in key_frames:
-            Kinv = key_frame.get_Kinv()
-            Twc = key_frame.get_Twc()
-            w = key_frame.get_width()
-            h = key_frame.get_height()
+        for key_frame in map.key_frames:
+            Kinv = key_frame.camera.Kinv
+            Twc = key_frame.Twc
+            w = key_frame.camera.width
+            h = key_frame.camera.height
             map_model.poses.append([Twc, Kinv, w, h])
 
-        for map_point in map_points:
+        for map_point in map.points3d:
             pos = map_point.get_pos()
             map_model.points.append(pos)
             
